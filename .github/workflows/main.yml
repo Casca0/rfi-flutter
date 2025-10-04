@@ -1,0 +1,178 @@
+name: Build & Release (Flutter Android + Windows)
+
+on:
+  push:
+    branches: [master, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: stable
+
+jobs:
+  android:
+    name: Android Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute_version.outputs.version }}
+      base_no_suffix: ${{ steps.compute_version.outputs.base_no_suffix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Tests
+        run: flutter test --concurrency=4
+
+      - name: Calcular versão dinâmica incremental
+        id: compute_version
+        run: |
+          set -euo pipefail
+          echo "Branch atual: $GITHUB_REF_NAME"
+
+          ORIGINAL_LINE=$(grep -E '^version:' pubspec.yaml)
+          BASE_VERSION=$(echo "$ORIGINAL_LINE" | sed -E 's/version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+
+          if [ "$GITHUB_REF_NAME" = "master" ]; then
+            last_tag=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1 || true)
+            if [ -z "$last_tag" ]; then
+              last_tag="v0.0.0"
+            fi
+            last_tag_base=${last_tag#v}
+
+            # Determina qual é maior: BASE_VERSION (do pubspec) ou last_tag_base
+            if [ "$(printf "%s\n%s\n" "$BASE_VERSION" "$last_tag_base" | sort -V | tail -n1)" = "$BASE_VERSION" ]; then
+              ref_version="$BASE_VERSION"
+            else
+              ref_version="$last_tag_base"
+            fi
+
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$ref_version"
+            PATCH=$((PATCH + 1))
+            NEW_BASE_VERSION="$MAJOR.$MINOR.$PATCH"
+            SUFFIX="master"
+          else
+            NEW_BASE_VERSION="$BASE_VERSION"
+            SUFFIX="dev"
+          fi
+
+          BUILD_NUM=${GITHUB_RUN_NUMBER}
+          NEW_VERSION="${NEW_BASE_VERSION}-${SUFFIX}+${BUILD_NUM}"
+
+          echo "Versão base original pubspec: $BASE_VERSION"
+          echo "Último tag encontrado: $last_tag"
+          echo "Nova versão base: $NEW_BASE_VERSION"
+            echo "Versão final: $NEW_VERSION"
+
+          sed -i -E "s/^version:.*/version: ${NEW_VERSION}/" pubspec.yaml
+
+          echo "version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          echo "base_no_suffix=${NEW_BASE_VERSION}" >> $GITHUB_OUTPUT
+
+          echo "Linha final pubspec:"
+          grep '^version:' pubspec.yaml
+
+      # (Opcional) Commit/push da nova versão – normalmente não recomendado automatizar
+      - name: Commit versão
+        if: ${{ github.ref_name == 'main' }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add pubspec.yaml
+          git commit -m "chore: bump version to $(grep '^version:' pubspec.yaml | awk '{print $2}')"
+          git push
+
+      - name: Build APK (release)
+        run: flutter build apk --release
+
+      - name: Build AppBundle (release)
+        run: flutter build appbundle --release
+
+      - name: Publicar artefatos Android
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-artifacts
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows Release
+    runs-on: windows-latest
+    needs: android
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Enable Windows
+        run: flutter config --enable-windows-desktop
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Sincronizar versão calculada
+        shell: pwsh
+        run: |
+          $version = "${{ needs.android.outputs.version }}"
+          (Get-Content pubspec.yaml) -replace '^version:.*', "version: $version" | Set-Content pubspec.yaml
+          Select-String -Path pubspec.yaml -Pattern '^version:'
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Build Windows (release)
+        run: flutter build windows --release
+
+      - name: Empacotar build Windows
+        shell: pwsh
+        run: |
+          $target="build/windows/x64/runner/Release"
+          $zip="windows-release.zip"
+          Compress-Archive -Path "$target/*" -DestinationPath $zip
+          Get-ChildItem $zip
+
+      - name: Publicar artefatos Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: windows-release.zip
+          if-no-files-found: error
+          retention-days: 7
