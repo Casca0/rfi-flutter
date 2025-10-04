@@ -2,14 +2,14 @@ name: Build & Release (Flutter Android APK + Windows ZIP)
 
 on:
   push:
-    branches: [main]
+    branches: [master, dev]
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-release-main
+  group: build-release
   cancel-in-progress: false
 
 env:
@@ -61,7 +61,7 @@ jobs:
           ORIGINAL_LINE=$(grep -E '^version:' pubspec.yaml)
           BASE_VERSION=$(echo "$ORIGINAL_LINE" | sed -E 's/version:[[:space:]]*([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
 
-          if [ "$GITHUB_REF_NAME" = "main" ]; then
+          if [ "$GITHUB_REF_NAME" = "master" ]; then
             last_tag=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sort -V | tail -n1 || true)
             [ -z "$last_tag" ] && last_tag="v0.0.0"
             last_tag_base=${last_tag#v}
@@ -75,7 +75,7 @@ jobs:
             IFS='.' read -r MAJOR MINOR PATCH <<< "$ref_version"
             PATCH=$((PATCH + 1))
             NEW_BASE_VERSION="$MAJOR.$MINOR.$PATCH"
-            SUFFIX="main"
+            SUFFIX="master"
           else
             NEW_BASE_VERSION="$BASE_VERSION"
             SUFFIX="dev"
