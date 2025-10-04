@@ -157,7 +157,7 @@ jobs:
     name: Release GitHub
     runs-on: ubuntu-latest
     needs: [android, windows]
-    if: ${{ github.ref_name == 'main' }}
+    if: ${{ github.ref_name == 'master' }}
     steps:
       - name: Download APK
         uses: actions/download-artifact@v4
